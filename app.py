@@ -21,18 +21,7 @@ SAMPLE_CSV = Path(__file__).parent / "data" / "sample_transactions.csv"
 
 def render_interface(transactions: list[dict], results: list[dict]) -> None:
     """
-    ══════════════════════════════════════════════════════════════════
-    À COMPLÉTER — votre interface intuitive pour le jury / le public.
-    ══════════════════════════════════════════════════════════════════
-
-    Idées (libres) :
-      - titres et textes en langage simple (« transaction suspecte », « client à risque ») ;
-      - cartes / indicateurs visuels (nombre d'alertes, niveau de risque) ;
-      - tableau ou liste filtrable (uniquement les suspectes, par client, par pays…) ;
-      - codes couleur, icônes, graphiques ;
-      - zone « comment l'IA / vos règles décident » pour expliquer une alerte.
-
-    Le jury évalue : clarté, utilité, intuitivité — pas le code en lui-même.
+    Affiche une synthèse lisible des alertes pour le jury et un public non technique.
     """
     tx_df = pd.DataFrame(transactions)
     res_df = pd.DataFrame(results)
@@ -48,6 +37,7 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
         ],
         axis=1,
     )
+    dashboard["risk_level"] = dashboard["fraud_score"].apply(_risk_level)
 
     alert_count = int(dashboard["is_suspicious"].sum())
     total_count = len(dashboard)
@@ -69,9 +59,10 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
 
     st.progress(min(average_score, 1.0), text=f"Risque moyen du lot : {average_score:.2f}")
 
-    tab_alerts, tab_all, tab_explain = st.tabs([
+    tab_alerts, tab_all, tab_clients, tab_explain = st.tabs([
         "Alertes prioritaires",
         "Toutes les transactions",
+        "Clients à surveiller",
         "Comment lire le score",
     ])
 
@@ -97,10 +88,8 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
             st.bar_chart(reason_counts)
 
     with tab_all:
-        selected_user = st.selectbox(
-            "Filtrer par client",
-            ["Tous"] + sorted(dashboard["user_id"].dropna().unique().tolist()),
-        )
+        users = sorted(dashboard.get("user_id", pd.Series(dtype=str)).dropna().unique().tolist())
+        selected_user = st.selectbox("Filtrer par client", ["Tous"] + users)
         show_only_alerts = st.toggle("Afficher seulement les alertes", value=False)
 
         filtered = dashboard.copy()
@@ -116,6 +105,41 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
             column_config=_column_config(),
         )
 
+    with tab_clients:
+        if "user_id" not in dashboard.columns:
+            st.info("Aucun identifiant client disponible pour cette analyse.")
+        else:
+            client_summary = (
+                dashboard.groupby("user_id", dropna=False)
+                .agg(
+                    transactions=("transaction_id", "count"),
+                    alertes=("is_suspicious", "sum"),
+                    risque_moyen=("fraud_score", "mean"),
+                    risque_max=("fraud_score", "max"),
+                )
+                .reset_index()
+                .sort_values(["alertes", "risque_max"], ascending=False)
+            )
+            st.dataframe(
+                client_summary,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "risque_moyen": st.column_config.ProgressColumn(
+                        "Risque moyen",
+                        min_value=0.0,
+                        max_value=1.0,
+                        format="%.2f",
+                    ),
+                    "risque_max": st.column_config.ProgressColumn(
+                        "Risque max",
+                        min_value=0.0,
+                        max_value=1.0,
+                        format="%.2f",
+                    ),
+                },
+            )
+
     with tab_explain:
         st.subheader("Règles utilisées")
         st.markdown(
@@ -127,6 +151,18 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
             - **Données manquantes** : une transaction incomplète mérite une vérification humaine.
             """
         )
+        st.info(
+            "Objectif : signaler les cas réellement risqués tout en évitant de bloquer "
+            "un client honnête pour une transaction seulement inhabituelle."
+        )
+
+
+def _risk_level(score: float) -> str:
+    if score >= 0.75:
+        return "Élevé"
+    if score >= 0.4:
+        return "À surveiller"
+    return "Faible"
 
 
 def _display_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -140,6 +176,7 @@ def _display_columns(df: pd.DataFrame) -> pd.DataFrame:
         "country",
         "card_present",
         "fraud_score",
+        "risk_level",
         "is_suspicious",
         "reason",
     ]
@@ -155,6 +192,7 @@ def _column_config() -> dict:
             format="%.2f",
         ),
         "is_suspicious": st.column_config.CheckboxColumn("Suspecte"),
+        "risk_level": st.column_config.TextColumn("Niveau"),
         "reason": st.column_config.TextColumn("Justification"),
     }
 
@@ -198,7 +236,8 @@ def main() -> None:
 
     if st.button("Analyser", type="primary"):
         try:
-            results = detect_fraud(transactions)
+            st.session_state["fraud_results"] = detect_fraud(transactions)
+            st.session_state["fraud_transactions"] = transactions
         except NotImplementedError:
             st.error("Implémentez d'abord `detect_fraud` dans `fraud_detection.py`.")
             return
@@ -206,7 +245,11 @@ def main() -> None:
             st.error(f"Erreur : {exc}")
             return
 
-        render_interface(transactions, results)
+    if "fraud_results" in st.session_state:
+        render_interface(
+            st.session_state.get("fraud_transactions", transactions),
+            st.session_state["fraud_results"],
+        )
 
 
 if __name__ == "__main__":

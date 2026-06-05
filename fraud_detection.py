@@ -12,6 +12,34 @@ from math import isfinite
 from statistics import median
 
 
+NEAR_COUNTRY_PAIRS = {
+    frozenset(pair)
+    for pair in (
+        ("FR", "BE"),
+        ("FR", "DE"),
+        ("FR", "ES"),
+        ("FR", "IT"),
+        ("FR", "CH"),
+        ("BE", "NL"),
+        ("DE", "NL"),
+        ("DE", "CH"),
+        ("TG", "BJ"),
+        ("TG", "GH"),
+        ("TG", "BF"),
+    )
+}
+
+CRITICAL_FIELDS = (
+    "transaction_id",
+    "timestamp",
+    "user_id",
+    "currency",
+    "merchant",
+    "country",
+    "card_present",
+)
+
+
 def load_transactions(path):
     """Lit un fichier CSV de transactions et renvoie une liste de dicts."""
     transactions = []
@@ -64,6 +92,7 @@ def detect_fraud(transactions):
 
     parsed_dates = [_parse_timestamp(tx.get("timestamp")) for tx in transactions]
     duplicate_ids = _duplicate_transaction_ids(transactions)
+    duplicate_fingerprints = _duplicate_transaction_fingerprints(transactions)
     geo_flags = _detect_fast_country_changes(transactions, parsed_dates)
     frequency_flags = _detect_high_frequency(transactions, parsed_dates)
     amount_groups = _group_valid_amounts(transactions)
@@ -77,6 +106,9 @@ def detect_fraud(transactions):
 
         if tx.get("transaction_id") in duplicate_ids:
             signals.append((0.9, "Identifiant de transaction dupliqué"))
+
+        if _transaction_fingerprint(tx) in duplicate_fingerprints:
+            signals.append((0.8, "Transaction répétée à l'identique"))
 
         if amount is None:
             signals.append((0.9, "Montant manquant"))
@@ -148,17 +180,32 @@ def _duplicate_transaction_ids(transactions):
     return {transaction_id for transaction_id, count in counts.items() if count > 1}
 
 
-def _missing_fields(tx):
+def _duplicate_transaction_fingerprints(transactions):
+    fingerprints = [
+        _transaction_fingerprint(tx)
+        for tx in transactions
+        if _transaction_fingerprint(tx) is not None
+    ]
+    counts = Counter(fingerprints)
+    return {fingerprint for fingerprint, count in counts.items() if count > 1}
+
+
+def _transaction_fingerprint(tx):
     fields = (
-        "transaction_id",
-        "timestamp",
-        "user_id",
-        "currency",
-        "merchant",
-        "country",
-        "card_present",
+        tx.get("user_id"),
+        tx.get("timestamp"),
+        tx.get("amount"),
+        tx.get("currency"),
+        tx.get("merchant"),
+        tx.get("country"),
     )
-    return [field for field in fields if tx.get(field) is None]
+    if any(value is None for value in fields):
+        return None
+    return fields
+
+
+def _missing_fields(tx):
+    return [field for field in CRITICAL_FIELDS if tx.get(field) is None]
 
 
 def _detect_fast_country_changes(transactions, parsed_dates):
@@ -179,11 +226,35 @@ def _detect_fast_country_changes(transactions, parsed_dates):
             previous_time, previous_country, previous_index = previous
             current_time, current_country, current_index = current
             hours = (current_time - previous_time).total_seconds() / 3600
-            if previous_country != current_country and 0 <= hours <= 2:
+            if _impossible_country_change(previous_country, current_country, hours):
                 flagged[previous_index] = True
                 flagged[current_index] = True
 
     return flagged
+
+
+def _impossible_country_change(previous_country, current_country, hours):
+    if hours < 0:
+        return False
+
+    previous_country = _normalize_country(previous_country)
+    current_country = _normalize_country(current_country)
+    if previous_country is None or current_country is None:
+        return False
+    if previous_country == current_country:
+        return False
+
+    pair = frozenset((previous_country, current_country))
+    if pair in NEAR_COUNTRY_PAIRS:
+        return hours <= 1
+
+    return hours <= 6
+
+
+def _normalize_country(country):
+    if not isinstance(country, str) or not country.strip():
+        return None
+    return country.strip().upper()
 
 
 def _detect_high_frequency(transactions, parsed_dates):
@@ -264,7 +335,10 @@ def _amount_signal(index, tx, amount_groups):
     amount = float(amount)
     baseline = [
         value
-        for other_index, value in amount_groups.get((tx.get("user_id"), tx.get("currency")), [])
+        for other_index, value in amount_groups.get(
+            (tx.get("user_id"), tx.get("currency")),
+            [],
+        )
         if other_index != index
     ]
 
@@ -299,7 +373,11 @@ def _large_online_payment(tx):
 
 
 def _is_valid_number(value):
-    return isinstance(value, (int, float)) and isfinite(value)
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and isfinite(value)
+    )
 
 
 def _choose_verdict(signals):
