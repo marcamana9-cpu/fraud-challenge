@@ -1,13 +1,4 @@
-"""
-Interface Streamlit — À CRÉER PAR VOUS pour le jury.
-
-Le jury lancera :  streamlit run app.py
-
-Règles :
-  - Ne modifiez pas l'appel à detect_fraud / load_transactions (contrat technique).
-  - Personnalisez render_interface() : clarté, intuitivité, compréhension pour un public non technique.
-  - L'interface n'est PAS notée par la CI ; elle sert au jury pour repêcher et comparer les candidats.
-"""
+"""Interface Streamlit de démonstration pour le détecteur de fraude."""
 
 from pathlib import Path
 
@@ -38,6 +29,7 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
         axis=1,
     )
     dashboard["risk_level"] = dashboard["fraud_score"].apply(_risk_level)
+    dashboard["recommended_action"] = dashboard.apply(_recommended_action, axis=1)
 
     alert_count = int(dashboard["is_suspicious"].sum())
     total_count = len(dashboard)
@@ -45,10 +37,18 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
     average_score = float(dashboard["fraud_score"].mean()) if total_count else 0.0
     max_score = float(dashboard["fraud_score"].max()) if total_count else 0.0
 
-    st.header("Tableau de bord anti-fraude")
-    st.write(
-        "Cette interface explique les alertes générées par le détecteur : "
-        "montants anormaux, pays incohérents, transactions rapprochées ou données manquantes."
+    st.markdown(
+        """
+        <div class="hero">
+            <p class="eyebrow">Hackathon IT 2026 · Sécurité financière</p>
+            <h2>Centre de décision anti-fraude</h2>
+            <p>
+                Priorisation automatique des transactions à risque avec justification
+                lisible pour accélérer la revue humaine.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     col1, col2, col3, col4 = st.columns(4)
@@ -58,6 +58,8 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
     col4.metric("Risque maximum", f"{max_score:.2f}")
 
     st.progress(min(average_score, 1.0), text=f"Risque moyen du lot : {average_score:.2f}")
+
+    st.caption(_executive_summary(alert_count, total_count, max_score))
 
     tab_alerts, tab_all, tab_clients, tab_explain = st.tabs([
         "Alertes prioritaires",
@@ -76,6 +78,7 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
             st.success("Aucune transaction suspecte détectée dans ce lot.")
         else:
             st.warning(f"{len(suspicious)} transaction(s) à vérifier en priorité.")
+            _render_alert_cards(suspicious.head(3))
             st.dataframe(
                 _display_columns(suspicious),
                 use_container_width=True,
@@ -157,12 +160,43 @@ def render_interface(transactions: list[dict], results: list[dict]) -> None:
         )
 
 
+def _executive_summary(alert_count: int, total_count: int, max_score: float) -> str:
+    if alert_count == 0:
+        return "Synthèse : aucune alerte prioritaire, le lot peut être validé après contrôle standard."
+    return (
+        f"Synthèse : {alert_count}/{total_count} transaction(s) à contrôler, "
+        f"avec un risque maximum de {max_score:.2f}."
+    )
+
+
+def _render_alert_cards(alerts: pd.DataFrame) -> None:
+    st.subheader("Top priorités")
+    for _, row in alerts.iterrows():
+        with st.container(border=True):
+            left, right = st.columns([2, 1])
+            left.markdown(
+                f"**Transaction `{row.get('transaction_id', 'N/A')}`**  \n"
+                f"{row.get('reason', 'Aucune justification disponible')}"
+            )
+            right.metric("Score", f"{float(row.get('fraud_score', 0.0)):.2f}")
+            st.caption(f"Action recommandée : {row.get('recommended_action', 'Contrôle standard')}")
+
+
 def _risk_level(score: float) -> str:
     if score >= 0.75:
         return "Élevé"
     if score >= 0.4:
         return "À surveiller"
     return "Faible"
+
+
+def _recommended_action(row: pd.Series) -> str:
+    score = float(row.get("fraud_score", 0.0) or 0.0)
+    if row.get("is_suspicious") or score >= 0.75:
+        return "Bloquer temporairement et vérifier l'identité du client"
+    if score >= 0.4:
+        return "Contrôler manuellement avant validation"
+    return "Valider avec surveillance normale"
 
 
 def _display_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -178,6 +212,7 @@ def _display_columns(df: pd.DataFrame) -> pd.DataFrame:
         "fraud_score",
         "risk_level",
         "is_suspicious",
+        "recommended_action",
         "reason",
     ]
     return df[[column for column in columns if column in df.columns]]
@@ -193,8 +228,40 @@ def _column_config() -> dict:
         ),
         "is_suspicious": st.column_config.CheckboxColumn("Suspecte"),
         "risk_level": st.column_config.TextColumn("Niveau"),
+        "recommended_action": st.column_config.TextColumn("Action recommandée"),
         "reason": st.column_config.TextColumn("Justification"),
     }
+
+
+def _inject_style() -> None:
+    st.markdown(
+        """
+        <style>
+        .hero {
+            padding: 1.4rem 1.6rem;
+            border: 1px solid rgba(49, 51, 63, 0.15);
+            border-radius: 18px;
+            background: linear-gradient(135deg, #f7fbff 0%, #eef6ff 100%);
+            margin-bottom: 1rem;
+        }
+        .hero h2 {
+            margin: 0.1rem 0 0.35rem 0;
+            font-size: 2rem;
+        }
+        .hero p {
+            margin-bottom: 0;
+        }
+        .eyebrow {
+            color: #2563eb;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            font-size: .8rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
@@ -203,6 +270,7 @@ def main() -> None:
         page_icon="🛡️",
         layout="wide",
     )
+    _inject_style()
 
     st.title("Détection de fraude financière")
     st.caption("Hackathon INTELO2026 — interface participant · évaluée par le jury")
